@@ -6,7 +6,7 @@ import utilities as ut
 import config
 
 # Create an empty DataFrame with the desired column names
-results_dictionary = []
+sde_results = []
 ut.create_data_dirs()
 
 # Loop over each ticker symbol
@@ -25,13 +25,13 @@ for ticker in config.TICKERS:
         # Calculate Weekly Analysis Data And get final results
         final_ticker_entry = ut.calculate_weekly_data_points(ticker, df, df_weekly)
 
-        # Add the dictionary of data to the final results array
-        results_dictionary.append(final_ticker_entry)
+        # Add the Stock Data Entries to the final results array
+        sde_results.append(final_ticker_entry)
 
         # Analyze Next Ticker
         print(f"{ticker}: CSP Analysis Complete\n\n")
 
 print("-- ALL TICKERS: CSP ANALYSIS COMPLETED --")
 
-# convert json array to dataframe and generate file
-ut.generate_results_file(results_dictionary)
+# convert the array of stock data entries to a final dataframe and generate file
+ut.generate_results_file(sde_results)

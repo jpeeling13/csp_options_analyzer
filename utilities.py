@@ -8,6 +8,8 @@ import math
 import config
 from datetime import datetime
 
+from csp_options_analyzer.stock_data_entry import StockDataEntry
+
 
 def create_data_dirs():
     # Ensure the directories needed exist
@@ -54,85 +56,57 @@ def resample_data_to_weekly(df):
 def calculate_weekly_data_points(ticker, df, df_weekly):
     # Add Weekly Return Data for each entry
     df_weekly['Weekly Return'] = df_weekly['Close'].pct_change(fill_method=None) * 100
+    sde = StockDataEntry()
 
     # ---------------------------------------------
     # -- CALCULATE ALL DATA FIELDS FOR THE ENTRY --
     # ---------------------------------------------
 
-    # Calculate "Data Start Date"
-    result_data_start_date = df_weekly.iloc[0]['Date'].date()
-
-    # Calculate "Data End Date"
-    result_data_end_date = df_weekly.iloc[-1]['Date'].date()
-
-    # Calculate "Weeks Analyzed"
-    result_total_weeks = df_weekly.shape[0]
-
-    # Calculate "Avg Weekly Return"
-    result_avg_weekly_return = np.round(df_weekly['Weekly Return'].mean(), 2)
+    # Set the ticker
+    sde.ticker = ticker
+    sde.data_start_date = df_weekly.iloc[0]['Date'].date()
+    sde.data_end_date = df_weekly.iloc[-1]['Date'].date()
+    sde.total_weeks = df_weekly.shape[0]
+    sde.avg_weekly_return = np.round(df_weekly['Weekly Return'].mean(), 2)
 
     # Calculate "Lowest Move Date", "Lowest Move Date", "Lowest Move %"
     lowest_move_index = df_weekly['Weekly Return'].idxmin()
+    sde.lowest_move_date = df_weekly.loc[lowest_move_index]['Date'].date()
+    sde.lowest_move_close = np.round(df_weekly.loc[lowest_move_index]['Close'], 2)
+    sde.lowest_move_pct = np.round(df_weekly.loc[lowest_move_index]['Weekly Return'], 3)
 
-    result_lowest_move_date = df_weekly.loc[lowest_move_index]['Date'].date()
-    result_lowest_move_close = np.round(df_weekly.loc[lowest_move_index]['Close'], 2)
-    result_lowest_move_pct = np.round(df_weekly.loc[lowest_move_index]['Weekly Return'], 3)
+    sde.last_close_date = df.iloc[-1]['Date'].date()
+    sde.last_close_price = np.round(df.iloc[-1]['Close'], 2)
+    sde.csp_safety_pct = config.CSP_SAFETY_PCT
+    sde.target_strike_pct_under_close, sde.pct_chance_assigned = calculate_target_pct_below_close(df_weekly)
 
-    # Calculate "Last Close Date"
-    result_last_close_date = df.iloc[-1]['Date'].date()
-
-    # Calculate "Last Close"
-    result_last_close_price = np.round(df.iloc[-1]['Close'], 2)
-
-    # Calculate "Target % Below Close" and "% Occurred"
-    result_required_pct_below_close, result_pct_occurred = calculate_target_pct_below_close(df_weekly)
-
-    # Calculate "Recommended Strike"
-    csp_strike_precise = result_last_close_price * ((100 + result_required_pct_below_close) / 100) * 2
-    result_target_csp_strike = math.floor(csp_strike_precise) / 2
+    # Calculate "Target Strike"
+    csp_strike_precise = sde.last_close_price * ((100 + sde.target_strike_pct_under_close) / 100) * 2
+    sde.target_strike = math.floor(csp_strike_precise) / 2
 
     # Calculate Recommended Option Data
-    result_options_data = calculate_one_week_options_data(ticker, result_target_csp_strike)
+    ticker_options_data = calculate_one_week_options_data(sde.ticker, sde.target_strike)
+    sde.max_contracts = np.floor(config.CASH_ON_HAND / (ticker_options_data["option_strike_used"] * 100))
 
-    # Calculate Max Contracts & Potential Profit
-    result_max_contracts = np.floor(config.CASH_ON_HAND / (result_options_data["option_strike_used"] * 100))
-    potential_profit_float = np.round(result_max_contracts * result_options_data["option_last_price"] * 100, 2)
-    result_potential_profit = f"${potential_profit_float:,.2f}"
+    # Calculate Potential Profit
+    potential_profit_float = np.round(sde.max_contracts * ticker_options_data["option_last_price"] * 100, 2)
+    sde.potential_profit = f"${potential_profit_float:,.2f}"
 
-    # Gather data into single dictionary result entry
-    results_entry = {
-        "Ticker": ticker,
-        "Data Start Date": result_data_start_date,
-        "Data End Date": result_data_end_date,
-        "Total Weeks": result_total_weeks,
-        "Avg Weekly Return": result_avg_weekly_return,
-        "Lowest Move Date": result_lowest_move_date,
-        "Lowest Move Close": result_lowest_move_close,
-        "Lowest Move %": result_lowest_move_pct,
-        "Last Close Date": result_last_close_date,
-        "Last Close Price": result_last_close_price,
-        "CSP Safety %": config.CSP_SAFETY_PCT,
-        "Target Strike (% Under Close)": result_required_pct_below_close,
-        "% Chance Assigned": result_pct_occurred,
-        "Target Strike": result_target_csp_strike,
-        "Option Strike Used": result_options_data["option_strike_used"],
-        "Option Expiry Date": result_options_data["option_expiry_date"],
-        "Option Days to Expiry": result_options_data["option_days_to_exp"],
-        "Option Last Price": result_options_data["option_last_price"],
-        "Option Volume": result_options_data["option_volume"],
-        "Option Open Interest": result_options_data["option_open_interest"],
-        "Option Implied Vol": result_options_data["option_impl_vol"],
-        "Option Delta": result_options_data["option_delta"],
-        "Option Theta": result_options_data["option_theta"],
-        "Option Gamma": result_options_data["option_gamma"],
-        "Option Vega": result_options_data["option_vega"],
-        "Option Rho": result_options_data["option_rho"],
-        "Cash On Hand": config.CASH_ON_HAND,
-        "Max Contracts": result_max_contracts,
-        "Potential Profit": result_potential_profit
-    }
+    sde.option_strike_used = ticker_options_data["option_strike_used"]
+    sde.option_expiry_date = ticker_options_data["option_expiry_date"]
+    sde.option_days_to_expiry = ticker_options_data["option_days_to_exp"]
+    sde.option_last_price = ticker_options_data["option_last_price"]
+    sde.option_volume = ticker_options_data["option_volume"]
+    sde.option_open_interest = ticker_options_data["option_open_interest"]
+    sde.option_implied_vol = ticker_options_data["option_impl_vol"]
+    sde.option_delta = ticker_options_data["option_delta"]
+    sde.option_theta = ticker_options_data["option_theta"]
+    sde.option_gamma = ticker_options_data["option_gamma"]
+    sde.option_vega = ticker_options_data["option_vega"]
+    sde.option_rho = ticker_options_data["option_rho"]
+    sde.cash_on_hand = config.CASH_ON_HAND
 
-    return results_entry
+    return sde
 
 
 def calculate_target_pct_below_close(df_weekly):
@@ -183,15 +157,18 @@ def calculate_one_week_options_data(ticker, recommended_strike):
     options_expiration_dates = ticker_data.options
 
     # Find the expiration date that is at least 7 calendar days from today
-    today = pd.Timestamp.today()
-    seven_days_out = today + pd.Timedelta(days=7)
+    today = pd.Timestamp.today().normalize()
+    six_days_out = today + pd.Timedelta(days=6)
 
     # Find the first expiration date that is 7 or more days away
     option_selected_expiry_date = None
     for expiration_date in options_expiration_dates:
-        if pd.Timestamp(expiration_date) >= seven_days_out:
+        if pd.Timestamp(expiration_date) >= six_days_out:
             option_selected_expiry_date = expiration_date
             break
+        else:
+            print(f"six days out from today: {six_days_out}")
+            print(f"options expiration date is not >= 6 days out: {pd.Timestamp(expiration_date)}")
 
     if option_selected_expiry_date:
 
@@ -248,32 +225,25 @@ def calculate_one_week_options_data(ticker, recommended_strike):
     return options_data_dictionary
 
 
-def generate_results_file(results_dictionary):
-    final_results_columns = ["Ticker", "Data Start Date", "Data End Date", "Total Weeks",
-                             "Avg Weekly Return", "Lowest Move Date", "Lowest Move Close", "Lowest Move %",
-                             "Last Close Date", "Last Close Price", "CSP Safety %", "Target Strike (% Under Close)",
-                             "% Chance Assigned", "Target Strike", "Option Strike Used", "Option Expiry Date",
-                             "Option Days to Expiry",
-                             "Option Last Price", "Option Volume", "Option Open Interest", "Option Implied Vol",
-                             "Option Delta", "Option Theta", "Option Gamma",
-                             "Option Vega", "Option Rho", "Cash On Hand", "Max Contracts", "Potential Profit"]
+def generate_results_file(sde_results):
+    final_results_df = StockDataEntry.new_dataframe()
 
-    final_results_df = pd.DataFrame(columns=final_results_columns)
-    for result in results_dictionary:
-        # Convert the dictionary to a DataFrame & save entry
-        final_entry_df = pd.DataFrame([result])
+    # Collect all result entries in a list
+    result_entries = []
 
-        # Check if final_entry_df is empty or contains only NA values before concatenating
-        if not final_entry_df.empty and not final_entry_df.dropna(how="all").empty:
-            final_results_df = pd.concat([final_results_df, final_entry_df], ignore_index=True)
-        else:
-            print("Skipping empty or all-NA DataFrame during concatenation.")
+    for result in sde_results:
+        result_entry = result.to_dict()
+        result_entries.append(result_entry)
+
+    # Use pd.concat to append all rows at once
+    final_results_df = pd.concat([final_results_df, pd.DataFrame(result_entries)], ignore_index=True)
+
 
     current_datetime = datetime.now()
     timestamp = current_datetime.strftime("%Y%m%d_%H%M%S")
 
     # Sort results by lowest % move for target strike
-    final_results_sorted_df = final_results_df.sort_values(by='Target Strike (% Under Close)', ascending=False)
+    final_results_sorted_df = final_results_df.sort_values(by='target_strike_pct_under_close', ascending=False)
 
     # Create a Results File using the timestamp
     results_filename = f"RESULTS_{timestamp}.csv"
