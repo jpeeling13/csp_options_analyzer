@@ -1,9 +1,7 @@
-from dotenv import load_dotenv
-import os
-import numpy as np
 import pandas as pd
 import utilities as ut
 import config
+from csp_options_analyzer.stock_data_entry import StockDataEntry
 
 # Create an empty DataFrame with the desired column names
 sde_results = []
@@ -23,7 +21,8 @@ for ticker in config.TICKERS:
         df_weekly = ut.resample_data_to_weekly(df)
 
         # Calculate Weekly Analysis Data And get final results
-        final_ticker_entry = ut.calculate_weekly_data_points(ticker, df, df_weekly)
+        final_ticker_entry = StockDataEntry()
+        final_ticker_entry.calculate_weekly_data_points(ticker, df, df_weekly)
 
         # Add the Stock Data Entries to the final results array
         sde_results.append(final_ticker_entry)

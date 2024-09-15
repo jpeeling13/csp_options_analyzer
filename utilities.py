@@ -1,13 +1,10 @@
 import os
-
 import mibian
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import math
 import config
 from datetime import datetime
-
 from csp_options_analyzer.stock_data_entry import StockDataEntry
 
 
@@ -32,8 +29,6 @@ def download_stock_data_csv(ticker):
 
         # Save the data to a CSV file
         data.to_csv(full_path)
-        print(f"Data for {ticker} saved to {full_path}")
-
         return full_path
 
     print(f"ERROR: No download data found for {ticker}...")
@@ -51,62 +46,6 @@ def resample_data_to_weekly(df):
     df_weekly.reset_index(inplace=True)
 
     return df_weekly
-
-
-def calculate_weekly_data_points(ticker, df, df_weekly):
-    # Add Weekly Return Data for each entry
-    df_weekly['Weekly Return'] = df_weekly['Close'].pct_change(fill_method=None) * 100
-    sde = StockDataEntry()
-
-    # ---------------------------------------------
-    # -- CALCULATE ALL DATA FIELDS FOR THE ENTRY --
-    # ---------------------------------------------
-
-    # Set the ticker
-    sde.ticker = ticker
-    sde.data_start_date = df_weekly.iloc[0]['Date'].date()
-    sde.data_end_date = df_weekly.iloc[-1]['Date'].date()
-    sde.total_weeks = df_weekly.shape[0]
-    sde.avg_weekly_return = np.round(df_weekly['Weekly Return'].mean(), 2)
-
-    # Calculate "Lowest Move Date", "Lowest Move Date", "Lowest Move %"
-    lowest_move_index = df_weekly['Weekly Return'].idxmin()
-    sde.lowest_move_date = df_weekly.loc[lowest_move_index]['Date'].date()
-    sde.lowest_move_close = np.round(df_weekly.loc[lowest_move_index]['Close'], 2)
-    sde.lowest_move_pct = np.round(df_weekly.loc[lowest_move_index]['Weekly Return'], 3)
-
-    sde.last_close_date = df.iloc[-1]['Date'].date()
-    sde.last_close_price = np.round(df.iloc[-1]['Close'], 2)
-    sde.csp_safety_pct = config.CSP_SAFETY_PCT
-    sde.target_strike_pct_under_close, sde.pct_chance_assigned = calculate_target_pct_below_close(df_weekly)
-
-    # Calculate "Target Strike"
-    csp_strike_precise = sde.last_close_price * ((100 + sde.target_strike_pct_under_close) / 100) * 2
-    sde.target_strike = math.floor(csp_strike_precise) / 2
-
-    # Calculate Recommended Option Data
-    ticker_options_data = calculate_one_week_options_data(sde.ticker, sde.target_strike)
-    sde.max_contracts = np.floor(config.CASH_ON_HAND / (ticker_options_data["option_strike_used"] * 100))
-
-    # Calculate Potential Profit
-    potential_profit_float = np.round(sde.max_contracts * ticker_options_data["option_last_price"] * 100, 2)
-    sde.potential_profit = f"${potential_profit_float:,.2f}"
-
-    sde.option_strike_used = ticker_options_data["option_strike_used"]
-    sde.option_expiry_date = ticker_options_data["option_expiry_date"]
-    sde.option_days_to_expiry = ticker_options_data["option_days_to_exp"]
-    sde.option_last_price = ticker_options_data["option_last_price"]
-    sde.option_volume = ticker_options_data["option_volume"]
-    sde.option_open_interest = ticker_options_data["option_open_interest"]
-    sde.option_implied_vol = ticker_options_data["option_impl_vol"]
-    sde.option_delta = ticker_options_data["option_delta"]
-    sde.option_theta = ticker_options_data["option_theta"]
-    sde.option_gamma = ticker_options_data["option_gamma"]
-    sde.option_vega = ticker_options_data["option_vega"]
-    sde.option_rho = ticker_options_data["option_rho"]
-    sde.cash_on_hand = config.CASH_ON_HAND
-
-    return sde
 
 
 def calculate_target_pct_below_close(df_weekly):
@@ -129,6 +68,52 @@ def calculate_target_pct_below_close(df_weekly):
 
     print("Could not calculate a weekly move % that happens below the threshold")
     return "ERROR"
+
+
+# Calculate the RSI (Relative Strength Index) with a 14-day window
+def calculate_rsi(df, window=14):
+    delta = df['Close'].diff(1)
+
+    # Separate gains and losses
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+
+    # Calculate the exponential moving average (Wilder's method)
+    avg_gain = gain.ewm(com=window - 1, adjust=False).mean()
+    avg_loss = loss.ewm(com=window - 1, adjust=False).mean()
+
+    # Calculate relative strength (RS)
+    rs = avg_gain / avg_loss
+
+    # Calculate RSI
+    rsi = 100 - (100 / (1 + rs))
+
+    return np.round(rsi.iloc[-1], 2)
+
+
+def calculate_tgt_strike_pct_runs(df_weekly, tgt_strike_pct):
+    # Calculate the percentage change in Close price from the previous week
+    df_weekly['pct_change'] = df_weekly['Close'].pct_change()
+
+    # Flag weeks when the stock closed above the tgt_strike_pct move
+    df_weekly['above_tgt_pct_move'] = df_weekly['pct_change'] >= tgt_strike_pct/100
+
+    # Identify consecutive runs of 'above_tgt_pct_move'
+    # Create a column that marks the start of a new run by comparing it to the previous row
+    df_weekly['run_change'] = df_weekly['above_tgt_pct_move'].ne(df_weekly['above_tgt_pct_move'].shift()).cumsum()
+
+    # Filter out only the groups where the stock was above the tgt_strike_pct move
+    positive_runs = df_weekly[df_weekly['above_tgt_pct_move']]
+
+    # Group by run_change and count the length of each run
+    run_lengths = positive_runs.groupby('run_change').size()
+
+    # Calculate statistics
+    longest_run = run_lengths.max()
+    shortest_run = run_lengths.min()
+    average_run = np.round(run_lengths.mean(), 2)
+
+    return longest_run, shortest_run, average_run
 
 
 def calculate_one_week_options_data(ticker, recommended_strike):
@@ -156,9 +141,9 @@ def calculate_one_week_options_data(ticker, recommended_strike):
     # Get options expiration dates
     options_expiration_dates = ticker_data.options
 
-    # Find the expiration date that is at least 7 calendar days from today
+    # Find the expiration date that is at least 6 calendar days from today
     today = pd.Timestamp.today().normalize()
-    six_days_out = today + pd.Timedelta(days=6)
+    six_days_out = today + pd.Timedelta(days=5)
 
     # Find the first expiration date that is 7 or more days away
     option_selected_expiry_date = None
@@ -167,8 +152,9 @@ def calculate_one_week_options_data(ticker, recommended_strike):
             option_selected_expiry_date = expiration_date
             break
         else:
-            print(f"six days out from today: {six_days_out}")
-            print(f"options expiration date is not >= 6 days out: {pd.Timestamp(expiration_date)}")
+            print(f"Today's Date: {today}")
+            print(f"Six Day's Out: {six_days_out}")
+            print(f"Option's Date is less than 6 days out: {expiration_date}")
 
     if option_selected_expiry_date:
 
@@ -183,7 +169,6 @@ def calculate_one_week_options_data(ticker, recommended_strike):
             closest_strike = min(available_strikes, key=lambda x: abs(x - recommended_strike))
 
             put_option = puts[puts['strike'] == closest_strike]
-            print(f"No exact match for strike {recommended_strike}. Using closest strike: {closest_strike}")
 
         # Get the first matching option (there should be only one, but just in case)
         put_option = put_option.iloc[0]
@@ -243,7 +228,7 @@ def generate_results_file(sde_results):
     timestamp = current_datetime.strftime("%Y%m%d_%H%M%S")
 
     # Sort results by lowest % move for target strike
-    final_results_sorted_df = final_results_df.sort_values(by='target_strike_pct_under_close', ascending=False)
+    final_results_sorted_df = final_results_df.sort_values(by='tgt_strike_pct', ascending=False)
 
     # Create a Results File using the timestamp
     results_filename = f"RESULTS_{timestamp}.csv"
