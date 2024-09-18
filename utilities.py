@@ -1,8 +1,6 @@
 import os
-import mibian
 import pandas as pd
 import numpy as np
-import yfinance as yf
 import config
 from datetime import datetime
 from csp_options_analyzer.stock_data_entry import StockDataEntry
@@ -18,37 +16,28 @@ def create_data_dirs():
         os.makedirs(config.RESULTS_DATA_DIR)
 
 
-def download_stock_data_csv(ticker):
-    print(f"Downloading data for {ticker}...")
-    data = yf.download(ticker)
+def download_stock_data_csv(ticker, data):
+    print(f"Saving data for {ticker}...")
 
-    if not data.empty:
-        # Define the output CSV file name
-        output_file_name = f'{ticker}{config.STOCK_DATA_FILE_ENDING}'
-        full_path = os.path.join(config.STOCK_DATA_DIR, output_file_name)
+    output_file_name = f'{ticker}{config.STOCK_DATA_FILE_ENDING}'
+    full_path = os.path.join(config.STOCK_DATA_DIR, output_file_name)
 
-        # Save the data to a CSV file
-        data.to_csv(full_path)
-        return full_path
-
-    print(f"ERROR: No download data found for {ticker}...")
-    return False
+    # Save the data to a CSV file
+    data.to_csv(full_path)
+    return full_path
 
 
 def resample_data_to_weekly(df):
-    # Resample data to weekly frequency, taking the last close price of each week
-    df['Date'] = pd.to_datetime(df['Date'], format='%Y-%m-%d')
+    # Resample using the index (which contains the Date) and take the last entry of each week
+    df_weekly = df.resample('W').last()
 
-    # Resample using the Date column and take the last entry of each week
-    df_weekly = df.resample('W', on='Date').last()
-
-    # Reset the index to make Date a regular column again
+    # Reset the index to make the Date a regular column again
     df_weekly.reset_index(inplace=True)
 
     return df_weekly
 
 
-def calculate_target_pct_below_close(df_weekly):
+def calculate_tgt_strike_pct_data(df_weekly):
     lowest_weekly_move_int = int(df_weekly['Weekly Return'].min())
 
     for num in np.arange(-.5, lowest_weekly_move_int, -0.5):
@@ -68,6 +57,31 @@ def calculate_target_pct_below_close(df_weekly):
 
     print("Could not calculate a weekly move % that happens below the threshold")
     return "ERROR"
+
+
+def calculate_tgt_strike_pct_runs(df_weekly, tgt_strike_pct):
+    # Calculate the percentage change in Close price from the previous week
+    df_weekly['pct_change'] = df_weekly['Close'].pct_change()
+
+    # Flag weeks when the stock closed above the tgt_strike_pct move
+    df_weekly['above_tgt_pct_move'] = df_weekly['pct_change'] >= tgt_strike_pct / 100
+
+    # Identify consecutive runs of 'above_tgt_pct_move'
+    # Create a column that marks the start of a new run by comparing it to the previous row
+    df_weekly['run_change'] = df_weekly['above_tgt_pct_move'].ne(df_weekly['above_tgt_pct_move'].shift()).cumsum()
+
+    # Filter out only the groups where the stock was above the tgt_strike_pct move
+    positive_runs = df_weekly[df_weekly['above_tgt_pct_move']]
+
+    # Group by run_change and count the length of each run
+    run_lengths = positive_runs.groupby('run_change').size()
+
+    # Calculate statistics
+    longest_run = run_lengths.max()
+    shortest_run = run_lengths.min()
+    average_run = np.round(run_lengths.mean(), 2)
+
+    return longest_run, shortest_run, average_run
 
 
 # Calculate the RSI (Relative Strength Index) with a 14-day window
@@ -91,123 +105,76 @@ def calculate_rsi(df, window=14):
     return np.round(rsi.iloc[-1], 2)
 
 
-def calculate_tgt_strike_pct_runs(df_weekly, tgt_strike_pct):
-    # Calculate the percentage change in Close price from the previous week
-    df_weekly['pct_change'] = df_weekly['Close'].pct_change()
+def calculate_macd(df, short_window=12, long_window=26, signal_window=9):
+    """
+    Calculate the MACD, Signal Line, and MACD Histogram for the most recent date.
 
-    # Flag weeks when the stock closed above the tgt_strike_pct move
-    df_weekly['above_tgt_pct_move'] = df_weekly['pct_change'] >= tgt_strike_pct/100
+    Parameters:
+    df (DataFrame): DataFrame containing historical stock data with 'Close' prices.
+    short_window (int): The window for the short-term EMA (default 12).
+    long_window (int): The window for the long-term EMA (default 26).
+    signal_window (int): The window for the signal line EMA (default 9).
 
-    # Identify consecutive runs of 'above_tgt_pct_move'
-    # Create a column that marks the start of a new run by comparing it to the previous row
-    df_weekly['run_change'] = df_weekly['above_tgt_pct_move'].ne(df_weekly['above_tgt_pct_move'].shift()).cumsum()
+    Returns:
+    dict: Dictionary containing the most recent MACD Line, Signal Line, and MACD Histogram.
+    """
+    # Calculate the short-term (12-period) EMA of the Close price
+    df['EMA_12'] = df['Close'].ewm(span=short_window, adjust=False).mean()
 
-    # Filter out only the groups where the stock was above the tgt_strike_pct move
-    positive_runs = df_weekly[df_weekly['above_tgt_pct_move']]
+    # Calculate the long-term (26-period) EMA of the Close price
+    df['EMA_26'] = df['Close'].ewm(span=long_window, adjust=False).mean()
 
-    # Group by run_change and count the length of each run
-    run_lengths = positive_runs.groupby('run_change').size()
+    # Calculate the MACD Line (12-period EMA - 26-period EMA)
+    df['MACD_Line'] = df['EMA_12'] - df['EMA_26']
 
-    # Calculate statistics
-    longest_run = run_lengths.max()
-    shortest_run = run_lengths.min()
-    average_run = np.round(run_lengths.mean(), 2)
+    # Calculate the Signal Line (9-period EMA of the MACD Line)
+    df['Signal_Line'] = df['MACD_Line'].ewm(span=signal_window, adjust=False).mean()
 
-    return longest_run, shortest_run, average_run
+    # Calculate the MACD Histogram (MACD Line - Signal Line)
+    df['MACD_Histogram'] = df['MACD_Line'] - df['Signal_Line']
 
+    # Get the most recent values (last row of the DataFrame)
+    most_recent = df.iloc[-1]
 
-def calculate_one_week_options_data(ticker, recommended_strike):
-    options_data_dictionary = {
-        "option_strike_used": "N/A",
-        "option_expiry_date": "N/A",
-        "option_days_to_exp": "N/A",
-        "option_last_price": "N/A",
-        "option_volume": "N/A",
-        "option_open_interest": "N/A",
-        "option_impl_vol": "N/A",
-        "option_delta": "N/A",
-        "option_theta": "N/A",
-        "option_gamma": "N/A",
-        "option_vega": "N/A",
-        "option_rho": "N/A"
+    # Return only the most recent MACD values
+    return {
+        'MACD_Line': np.round(most_recent['MACD_Line'], 3),
+        'Signal_Line': np.round(most_recent['Signal_Line'], 3),
+        'MACD_Histogram': np.round(most_recent['MACD_Histogram'], 3)
     }
 
-    # Fetch the ticker data
-    ticker_data = yf.Ticker(ticker)
 
-    # Get the current stock price
-    stock_price = np.round(ticker_data.history(period="1d")["Close"].iloc[0], 3)
+def calculate_bollinger_bands(df, window=20, num_std_dev=2):
+    """
+    Calculate the Bollinger Bands for the most recent date.
 
-    # Get options expiration dates
-    options_expiration_dates = ticker_data.options
+    Parameters:
+    df (DataFrame): DataFrame containing historical stock data with 'Close' prices.
+    window (int): The window size for the moving average (default 20).
+    num_std_dev (int): The number of standard deviations for the bands (default 2).
 
-    # Find the expiration date that is at least 6 calendar days from today
-    today = pd.Timestamp.today().normalize()
-    six_days_out = today + pd.Timedelta(days=5)
+    Returns:
+    dict: Dictionary containing the most recent Bollinger Bands (Upper, Lower, Middle) and Close price.
+    """
+    # Calculate the 20-day Simple Moving Average (SMA) for the 'Close' prices
+    df['SMA'] = df['Close'].rolling(window=window).mean()
 
-    # Find the first expiration date that is 7 or more days away
-    option_selected_expiry_date = None
-    for expiration_date in options_expiration_dates:
-        if pd.Timestamp(expiration_date) >= six_days_out:
-            option_selected_expiry_date = expiration_date
-            break
-        else:
-            print(f"Today's Date: {today}")
-            print(f"Six Day's Out: {six_days_out}")
-            print(f"Option's Date is less than 6 days out: {expiration_date}")
+    # Calculate the rolling standard deviation of the 'Close' prices
+    df['STD_DEV'] = df['Close'].rolling(window=window).std(ddof=0)
 
-    if option_selected_expiry_date:
+    # Calculate the Upper and Lower Bollinger Bands
+    df['Upper_Band'] = df['SMA'] + (num_std_dev * df['STD_DEV'])
+    df['Lower_Band'] = df['SMA'] - (num_std_dev * df['STD_DEV'])
 
-        # Fetch the options chain for the selected expiration date
-        options_chain = ticker_data.option_chain(option_selected_expiry_date)
-        puts = options_chain.puts
-        put_option = puts[puts['strike'] == recommended_strike]
+    # Get the most recent values (last row of the DataFrame)
+    most_recent = df.iloc[-1]
 
-        # If no exact match, find the closest strike price
-        if put_option.empty:
-            available_strikes = puts['strike'].values
-            closest_strike = min(available_strikes, key=lambda x: abs(x - recommended_strike))
-
-            put_option = puts[puts['strike'] == closest_strike]
-
-        # Get the first matching option (there should be only one, but just in case)
-        put_option = put_option.iloc[0]
-
-        # Extract relevant data from the option
-        option_strike_used = put_option["strike"]
-        option_days_to_exp = (pd.to_datetime(option_selected_expiry_date) - today).days
-        option_last_price = put_option['lastPrice']
-        option_volume = put_option["volume"]
-        option_open_interest = put_option["openInterest"]
-        option_implied_volatility = np.round(put_option['impliedVolatility'] * 100, 3)  # mibian expects percentage
-
-        # Get the current 3-month Treasury bill rate
-        tbill = yf.Ticker("^IRX")
-        tbill_data = tbill.history(period="1d")
-        current_rate = tbill_data["Close"].iloc[0]
-
-        # Use mibian to calculate Greeks
-        bs = mibian.BS([stock_price, option_strike_used, current_rate, option_days_to_exp],
-                       volatility=option_implied_volatility, putPrice=option_last_price)
-
-        # Save off values to dictionary
-        options_data_dictionary["option_strike_used"] = option_strike_used
-        options_data_dictionary["option_expiry_date"] = option_selected_expiry_date
-        options_data_dictionary["option_days_to_exp"] = option_days_to_exp
-        options_data_dictionary["option_last_price"] = option_last_price
-        options_data_dictionary["option_volume"] = option_volume
-        options_data_dictionary["option_open_interest"] = option_open_interest
-        options_data_dictionary["option_impl_vol"] = option_implied_volatility
-        options_data_dictionary["option_delta"] = np.round(bs.putDelta, 3)
-        options_data_dictionary["option_theta"] = np.round(bs.putTheta, 3)
-        options_data_dictionary["option_gamma"] = np.round(bs.gamma, 3)
-        options_data_dictionary["option_vega"] = np.round(bs.vega, 3)
-        options_data_dictionary["option_rho"] = np.round(bs.putRho, 3)
-
-    else:
-        print("No expiration date found that is 7 or more days out.")
-
-    return options_data_dictionary
+    # Return only the most recent Bollinger Bands and close price
+    return {
+        'Upper_Band': np.round(most_recent['Upper_Band'], 2),
+        'Lower_Band': np.round(most_recent['Lower_Band'], 2),
+        'Middle_Band': np.round(most_recent['SMA'], 2)
+    }
 
 
 def generate_results_file(sde_results):
@@ -220,15 +187,23 @@ def generate_results_file(sde_results):
         result_entry = result.to_dict()
         result_entries.append(result_entry)
 
-    # Use pd.concat to append all rows at once
-    final_results_df = pd.concat([final_results_df, pd.DataFrame(result_entries)], ignore_index=True)
+    # Create DataFrame from result_entries
+    result_entries_df = pd.DataFrame(result_entries)
 
+    # Drop columns that are entirely NA
+    result_entries_df = result_entries_df.dropna(how='all', axis=1)
+
+    # Only concatenate if result_entries_df is not empty
+    if not result_entries_df.empty:
+        final_results_df = pd.concat([final_results_df, result_entries_df], ignore_index=True)
+    else:
+        print("No valid entries to concatenate.")
 
     current_datetime = datetime.now()
     timestamp = current_datetime.strftime("%Y%m%d_%H%M%S")
 
     # Sort results by lowest % move for target strike
-    final_results_sorted_df = final_results_df.sort_values(by='tgt_strike_pct', ascending=False)
+    final_results_sorted_df = final_results_df.sort_values(by='ticker', ascending=True)
 
     # Create a Results File using the timestamp
     results_filename = f"RESULTS_{timestamp}.csv"
