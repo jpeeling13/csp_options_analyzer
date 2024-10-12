@@ -53,7 +53,9 @@ class StockDataEntry:
         self.cash_on_hand = None
         self.max_contracts = None
         self.potential_profit = None
-        #self.i_close_below_tgt_strike_pct = None
+        self.ind_tgt_strike_pct = None
+        self.ind_tgt_strike_pct_occurs = None
+        self.ind_tgt_strike_pct_current_run = None
 
     @classmethod
     def new_dataframe(cls):
@@ -108,6 +110,7 @@ class StockDataEntry:
         self.potential_profit = f"${potential_profit_float:,.2f}"
 
         # Calculate the special indicators to determine whether to recommend the option or not
+        self.set_ind_tgt_strike_pct()
 
         # Perform safety check to ensure all fields are set
         self._validate_fields()
@@ -180,10 +183,6 @@ class StockDataEntry:
             if pd.Timestamp(expiration_date) >= x_days_out:
                 option_selected_expiry_date = expiration_date
                 break
-            else:
-                print(f"Today's Date: {today}")
-                print(f"{timeframe + 1} Days Out: {x_days_out}")
-                print(f"Option's Date is less than {timeframe + 1} days out: {expiration_date}")
 
         if option_selected_expiry_date:
 
@@ -229,3 +228,48 @@ class StockDataEntry:
 
         else:
             print("No expiration date found that is 7 or more days out.")
+
+    # INDICATOR: Check if ticker has closed below tgt_strike_pct within most recent tgt_strike_pct_hist_run_avg
+    # The rationale for this indicator is that if the stock has closed below the tgt_strike_pct within the last
+    # average number of weeks it takes to drop below that pct, then it's unlikely to happen again. Conversely, if it
+    # hasn't dropped below the pct yet, then it's likely to happen soon.
+    def set_ind_tgt_strike_pct(self):
+
+        # Ensure the DataFrame is sorted by date
+        self.df_weekly = self.df_weekly.sort_values(by='Date')
+        avg_run_weeks = round(self.tgt_strike_pct_hist_run_avg)
+
+        # Filter for the last y weeks
+        df_last_avg_run_weeks = self.df_weekly.tail(avg_run_weeks)
+
+        # Calculate the percentage change compared to the previous week's close
+        df_last_avg_run_weeks.loc[:, 'pct_change'] = np.round(df_last_avg_run_weeks['Close'].pct_change() * 100, 2)
+
+        # Find the rows where the percentage change is below the threshold (x_pct)
+        closed_below_threshold = df_last_avg_run_weeks[df_last_avg_run_weeks['pct_change'] < self.tgt_strike_pct]
+
+        # Always calculate the last occurrence in the entire dataset
+        self.df_weekly.loc[:, 'pct_change'] = np.round(self.df_weekly['Close'].pct_change() * 100, 2)  # Calculate for entire dataset
+        full_closed_below_threshold = self.df_weekly[self.df_weekly['pct_change'] < self.tgt_strike_pct]
+        weeks_since_last_occurrence = -1
+
+        if not full_closed_below_threshold.empty:
+            print("got in here...")
+            last_occurrence_date = full_closed_below_threshold.iloc[-1]['Date']
+            most_recent_date = self.df_weekly['Date'].max()
+
+            # Calculate the time difference in weeks
+            weeks_since_last_occurrence = (most_recent_date - last_occurrence_date).days / 7
+            weeks_since_last_occurrence = int(weeks_since_last_occurrence)
+
+        # Check if there are any such occurrences
+        if not closed_below_threshold.empty:
+            self.ind_tgt_strike_pct = True
+            self.ind_tgt_strike_pct_occurs = len(closed_below_threshold)
+            self.ind_tgt_strike_pct_current_run = weeks_since_last_occurrence
+
+        else:
+            self.ind_tgt_strike_pct = False
+            self.ind_tgt_strike_pct_occurs = 0
+            self.ind_tgt_strike_pct_current_run = weeks_since_last_occurrence
+
