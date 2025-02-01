@@ -4,8 +4,7 @@ import utilities as ut
 import math
 import mibian
 import yfinance as yf
-
-from csp_options_analyzer import config
+import config
 
 
 class StockDataEntry:

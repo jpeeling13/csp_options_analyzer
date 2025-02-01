@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import config
 from datetime import datetime
-from csp_options_analyzer.stock_data_entry import StockDataEntry
+from stock_data_entry import StockDataEntry
 
 
 def create_data_dirs():
