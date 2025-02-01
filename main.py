@@ -1,7 +1,7 @@
 import yfinance as yf
 import utilities as ut
 import config
-from csp_options_analyzer.stock_data_entry import StockDataEntry
+from stock_data_entry import StockDataEntry
 
 
 # Create an empty DataFrame with the desired column names
